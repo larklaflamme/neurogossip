@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neurogossip-client"
+version = "0.1.0"
+description = "Async client library for the Neurogossip agent registry & direct-messaging server."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Neurogossip Contributors" },
+]
+keywords = [
+    "neurogossip", "agent", "agents", "websocket", "messaging",
+    "multi-agent", "llm", "autonomous-agents", "registry", "relay",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "websockets>=14",
+]
+
+[project.urls]
+Homepage = "https://github.com/neurogossip/neurogossip"
+Documentation = "https://github.com/neurogossip/neurogossip/blob/main/design/DESIGN_v5_FINAL.md"
+Source = "https://github.com/neurogossip/neurogossip"
+Issues = "https://github.com/neurogossip/neurogossip/issues"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
