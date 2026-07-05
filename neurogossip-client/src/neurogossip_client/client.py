@@ -53,12 +53,20 @@ class NeurogossipClient:
                  metadata: Optional[dict] = None,
                  auth_token: Optional[str] = None,
                  reconnect_backoff_s: float = 5.0,
+                 max_reconnect_backoff_s: float = 60.0,
+                 open_timeout_s: float = 10.0,
+                 auto_receipt: bool = True,
+                 inbound_queue_size: int = 10000,
                  logger: Optional[logging.Logger] = None):
         self.server_url = server_url
         self.agent_id = agent_id
         self.metadata = metadata or {}
         self.auth_token = auth_token
         self.reconnect_backoff_s = reconnect_backoff_s
+        self.max_reconnect_backoff_s = max_reconnect_backoff_s
+        self.open_timeout_s = open_timeout_s
+        self.auto_receipt = auto_receipt
+        self.inbound_queue_size = inbound_queue_size
         self.logger = logger or logging.getLogger(f"client.{agent_id}")
 
         self.websocket: Optional[websockets.WebSocketClientProtocol] = None
@@ -75,13 +83,18 @@ class NeurogossipClient:
         self._on_error: Optional[Callable] = None
 
         # Internal state
-        self._message_queue: asyncio.Queue = asyncio.Queue()
+        self._message_queue: asyncio.Queue = asyncio.Queue(maxsize=inbound_queue_size)
         self._listen_task: Optional[asyncio.Task] = None
         self._reconnect_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._online_agents: dict[str, dict] = {}
         self._agent_list_futures: deque = deque()
         self._reconnecting = False
+        # Outstanding on_message handler tasks (tracked so exceptions are retrieved).
+        self._handler_tasks: set = set()
+        # Current reconnect backoff (exponential, reset to reconnect_backoff_s on
+        # a successful connection). Starts at the initial backoff.
+        self._reconnect_backoff = self.reconnect_backoff_s
 
     @staticmethod
     def _ws_closed(ws) -> bool:
@@ -108,12 +121,27 @@ class NeurogossipClient:
         """Connect to the Neurogossip server and register."""
         self._running = True
         await self._connect_socket()
+        self._reconnect_backoff = self.reconnect_backoff_s  # reset on fresh connect
         self._start_background_tasks()
         self.logger.info(f"Connected as {self.agent_id} (session {self.session_id})")
 
     async def _connect_socket(self):
-        """Open the WebSocket and complete registration. Raises on failure."""
-        self.websocket = await websockets.connect(self.server_url)
+        """Open the WebSocket and complete registration. Raises on failure.
+
+        ``open_timeout_s`` bounds the opening handshake so a silently-unreachable
+        or wedged server fails fast (instead of hanging on the default ~10s
+        timeout and logging a surprising "timed out during opening handshake").
+        ``ping_interval`` / ``ping_timeout`` enable WebSocket-level keepalive so
+        a half-open/dead peer is detected and closed promptly, letting the
+        reconnect watcher restore the session instead of stalling on a socket
+        that looks alive but never delivers.
+        """
+        self.websocket = await websockets.connect(
+            self.server_url,
+            open_timeout=self.open_timeout_s,
+            ping_interval=20,
+            ping_timeout=20,
+        )
         await self._register()
         self._connected = True
 
@@ -188,11 +216,18 @@ class NeurogossipClient:
                 try:
                     await self._connect_socket()
                 except Exception as e:
-                    self.logger.error(f"Reconnection failed: {e}")
-                    await asyncio.sleep(self.reconnect_backoff_s)
+                    # Exponential backoff: sleep the current backoff, then grow it
+                    # (capped) so a long server outage doesn't hammer the handshake
+                    # at a fixed 5s cadence. Reset to the initial backoff on success.
+                    self.logger.error(
+                        f"Reconnection failed (backoff {self._reconnect_backoff:.1f}s): {e}")
+                    await asyncio.sleep(self._reconnect_backoff)
+                    self._reconnect_backoff = min(
+                        self._reconnect_backoff * 2, self.max_reconnect_backoff_s)
                     self._reconnecting = False
                     continue
-                # Restart listen + heartbeat; this watcher keeps running.
+                # Reconnected — reset the backoff and restart listen + heartbeat.
+                self._reconnect_backoff = self.reconnect_backoff_s
                 self._listen_task = asyncio.create_task(self._listen_loop())
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
                 self._reconnecting = False
@@ -372,6 +407,11 @@ class NeurogossipClient:
             raise RuntimeError("Not connected")
         await self.websocket.send(json.dumps(frame))
 
+    def _track_task(self, task: asyncio.Task) -> None:
+        """Track a fire-and-forget task so its exceptions are retrieved."""
+        self._handler_tasks.add(task)
+        task.add_done_callback(self._handler_tasks.discard)
+
     async def _listen_loop(self):
         """Listen for incoming frames from the server."""
         while self._running:
@@ -392,10 +432,31 @@ class NeurogossipClient:
         msg_type = frame.get("type")
 
         if msg_type == "message":
-            # Incoming message from another agent
+            # Incoming message from another agent.
+            # 1) Auto-receipt immediately so the server's end-to-end ACK completes even
+            #    if the user's on_message handler is slow (keeps the sender's watcher
+            #    from timing out to "unconfirmed").
+            msg_id = frame.get("msg_id")
+            if self.auto_receipt and msg_id is not None:
+                t = asyncio.create_task(self.send_receipt(msg_id))
+                self._track_task(t)
+            # 2) Dispatch the user callback as its own task so the listen loop never
+            #    blocks on a slow handler (it must keep reading pongs/frames).
             if self._on_message:
-                await self._on_message(frame)
-            self._message_queue.put_nowait(frame)
+                t = asyncio.create_task(self._on_message(frame))
+                self._track_task(t)
+            # 3) Enqueue for wait_for_message, with drop-oldest backpressure.
+            try:
+                self._message_queue.put_nowait(frame)
+            except asyncio.QueueFull:
+                try:
+                    self._message_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    self._message_queue.put_nowait(frame)
+                except asyncio.QueueFull:
+                    self.logger.warning("inbound queue full, dropped msg_id=%s", msg_id)
 
         elif msg_type == "presence":
             # Presence change

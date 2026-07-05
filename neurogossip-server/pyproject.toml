@@ -33,6 +33,7 @@ classifiers = [
 ]
 dependencies = [
     "websockets>=14",
+    "rich>=13",
 ]
 
 [project.urls]

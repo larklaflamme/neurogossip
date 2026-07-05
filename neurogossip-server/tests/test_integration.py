@@ -110,7 +110,7 @@ async def test_e2e_delivered(server):
 
 async def test_e2e_unconfirmed_when_no_receipt(server):
     a = await make_client(server, "axioma")
-    b = await make_client(server, "thea")  # no auto-receipt
+    b = await make_client(server, "thea", auto_receipt=False)  # no receipt → unconfirmed
     acks = Listener()
     a.on_ack(acks)
     try:

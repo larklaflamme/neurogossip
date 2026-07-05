@@ -187,6 +187,8 @@ async def test_handle_message_invokes_callback_and_queues():
     msg = {"type": "message", "from": "thea", "body": "hi", "msg_id": "m1",
            "reply_to": None, "conversation_id": "c", "seq": 1, "depth": 1, "ts": "t"}
     await c._handle_frame(msg)
+    # on_message is dispatched as a task — give the loop a tick to run it.
+    await asyncio.sleep(0)
     assert seen == [msg]
     # Also available via wait_for_message
     got = await c.wait_for_message(timeout=0.1)
